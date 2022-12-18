@@ -1,135 +1,151 @@
 import Rhino.Geometry as rh
+from scriptcontext import doc
+import json
+
+### GET LOCAL PATH
+gh_path = ghenv.Component.OnPingDocument().FilePath.split("G:\My Drive\_GSAPP Classes\Fall\Design Intelligence\Final Project - Packing\2")
+print "Local GH path: {}".format(gh_path)
+
+#scripts_path = "\\".join(gh_path[:-1] + ["_scripts"])
+#if scripts_path not in sys.path: sys.path.append(scripts_path)
 
 
-class Agent:
 
-    def __init__(self, pt, r):
+# get absolute and angle tolerances from document
+abs_tol = doc.ModelAbsoluteTolerance
+ang_tol = doc.ModelAngleToleranceRadians
 
-        self.cp = pt
-        self.radius = r
-        self.neighbors = []
-
-    # method for adding another instance to a list of neighbors
-    def add_neighbor(self, other):
-        self.neighbors.append(other)
-
-    # method for checking distance to other room object and moving apart if they are overlapping
-    def collide(self, other, alpha):
-
-        d = self.cp.DistanceTo(other.cp)
-
-        amount = 0
-
-        if d < self.radius + other.radius:
-
-            pt_2 = other.cp
-            pt_1 = self.cp
-
-            # get vector from self to other
-            v = pt_2 - pt_1
-
-            # change vector magnitude to 1
-            v.Unitize()
-            # set magnitude to half the overlap distance
-            v *= (self.radius + other.radius - d) / 2
-            # multiply by alpha parameter to control
-            # amount of movement at each time step
-            v *= alpha
-
-            amount = v.Length
-
-            # move other object
-            t = rh.Transform.Translation(v)
-            pt_2.Transform(t)
-
-            # reverse vector and move self same amount
-            # in opposite direction
-            v.Reverse()
-            t = rh.Transform.Translation(v)
-            pt_1.Transform(t)
-
-        return amount
-
-    # method for checking distance to other instance and moving closer if they are not touching
-    def cluster(self, other, alpha):
-
-        d = self.cp.DistanceTo(other.cp)
-
-        amount = 0
-
-        if d > self.radius + other.radius:
-
-            pt_2 = other.cp
-            pt_1 = self.cp
-
-            # get vector from self to other
-            v = pt_2 - pt_1
-
-            # change vector magnitude to 1
-            v.Unitize()
-            # set magnitude to half the overlap distance
-            v *= (d - (self.radius + other.radius)) / 2
-            # multiply by alpha parameter to control
-            # amount of movement at each time step
-            v *= alpha
-
-            amount = v.Length
-
-            # move self
-            t = rh.Transform.Translation(v)
-            pt_1.Transform(t)
-
-            # reverse vector and move other object same amount
-            # in opposite direction
-            v.Reverse()
-            t = rh.Transform.Translation(v)
-            pt_2.Transform(t)
-
-        return amount
-
-    def get_circle(self):
-        return rh.Circle(self.cp, self.radius)
+# this function splits a curve c1 with another curve c2
 
 
-def run(pts, radii, max_iters, alpha, adjacencies):
+def split_curve(c1, c2, close):
+    # get intersection events between two curves
+    inter = rh.Intersect.Intersection.CurveCurve(c1, c2, abs_tol, abs_tol)
 
-    print(adjacencies)
+    # get parameters on first curve from all intersection events
+    # this code uses a "list comprehension" which is a shortcut for iterating over a list in Python
+    # this single line does the same thing as:
 
-    agents = []
+    # p = []
+    # for i in range(inter.Count):
+    # p.append(inter[i].ParameterA)
 
-    for i, pt in enumerate(pts):
-        my_agent = Agent(pt, radii[i])
-        agents.append(my_agent)
+    p = [inter[i].ParameterA for i in range(inter.Count)]
 
-    # for each agent in the list, add the previous agent as its neighbor
-    for i in range(len(agents)):
-        agents[i].add_neighbor(agents[i-1])
+    # handle multiple intersections (for non-convex boundaries)
 
-    for i in range(max_iters):
+    # if more than two parameters are returned, it means that the boundary shape is non-convex
+    # and was split by the split line into more than two pieces
+    # since we only want two pieces, we must find two consecutive parameters
+    # which split the boundary into only two separate pieces
 
-        total_amount = 0
+    if len(p) > 2:
 
-        for j, agent_1 in enumerate(agents):
+        # loop over all parameters
+        for i in range(len(p)):
 
-            # cluster to all agent's neighbors
-            for agent_2 in agent_1.neighbors:
-                total_amount += agent_1.cluster(agent_2, alpha)
+            # get the points at the previous and current parameters in the list
+            pt1 = c1.PointAt(p[i-1])
+            pt2 = c1.PointAt(p[i])
 
-            # collide with all agents after agent in list
-            for agent_2 in agents[j+1:]:
-                # add extra multiplier to decrease effect of cluster
-                total_amount += agent_1.collide(agent_2, alpha/5)
+            # get the line between the two points
+            l = rh.Line(pt1, pt2).ToNurbsCurve()
 
-        if total_amount < .01:
-            break
+            # check how many times the line intersects the boundary
+            inter = rh.Intersect.Intersection.CurveCurve(
+                c1, l.ToNurbsCurve(), abs_tol, abs_tol)
 
-    iters = i
+            # if there are only two intersections, return the two parameters
+            # and break out of loop
+            if len(inter) == 2:
+                p = [p[i-1], p[i]]
+                break
 
-    print("process ran for {} iterations".format(i))
+    # split the curve by the parameters
+    pieces = c1.Split(p)
 
-    circles = []
+    # create a new list to store the final curves
+    curves = []
 
-    for agent in agents:
-        circles.append(agent.get_circle())
+    # iterate over pieces
+    for piece in pieces:
+        # if closed curves were requested and the curve is not closed
+        if close == True and not piece.IsClosed:
+            # create a new line to close the curve, join them together, and add the result to curves list
+            line = rh.Line(piece.PointAtStart, piece.PointAtEnd).ToNurbsCurve()
+            curves += rh.NurbsCurve.JoinCurves([piece, line])
+        else:
+            # otherwise add the original piece to the curves list
+            curves.append(piece)
 
-    return circles, iters
+    # return the final curves
+    return curves
+
+# this function splits a space with two parameters
+
+
+def split_space(curve, dir, param):
+
+    # get the bounding box of the curve
+    bb = curve.GetBoundingBox(True)
+    # get the base point of the bounding box
+    base_pt = rh.Point3d(bb.Min.X, bb.Min.Y, 0.0)
+
+    # get the x and y dimensions of the bounding box
+    x = bb.Max.X - bb.Min.X
+    y = bb.Max.Y - bb.Min.Y
+
+    # create a list of the x,y dimensions and x,y unit vectors
+    dims = [x, y]
+    vecs = [rh.Vector3d(1, 0, 0), rh.Vector3d(0, 1, 0)]
+
+    # create a vector to position the split line based on the two parameters
+    vec_1 = vecs[dir] * dims[dir] * param
+
+    # copy the base point
+    new_pt_1 = rh.Point3d(base_pt)
+    # move the new point according to the vector
+    new_pt_1.Transform(rh.Transform.Translation(vec_1))
+
+    # calculate the opposite of the dir parameter
+    # if the parameter is 0 this results in 1, if 1 then 0
+    other_dir = abs(dir-1)
+
+    # create a vector in the other direction the full extent of the bounding box
+    vec_2 = vecs[other_dir] * dims[other_dir]
+
+    # create a copy of the moved point
+    new_pt_2 = rh.Point3d(new_pt_1)
+    # move the point to define the other end point of the split line
+    new_pt_2.Transform(rh.Transform.Translation(vec_2))
+
+    # create the split line and convert it to a Nurbs Curve
+    # (this is necessary to make the splitting work in the next function)
+    split_line = rh.Line(new_pt_1, new_pt_2).ToNurbsCurve()
+
+    # use the split_curve() function to split the boundary with the split line
+    parts = split_curve(curve, split_line, True)
+
+    # return the curves resulting from the split
+    return parts
+
+# this function calls the split_space() function recursively
+# to continuosly split an input curve into parts based on a set of parameters
+
+
+def split_recursively(curves, dirs, params):
+
+    # if there are no more parameters in the list, return the input curves
+    if len(dirs) <= 0 or len(params) <= 0:
+        return curves
+
+    # get the first parameters and the first curve from the input lists
+    dir = dirs.pop(0)
+    param = params.pop(0)
+    curve = curves.pop(0)
+
+    # split the curve and add the results to the curves list
+    curves += split_space(curve, dir, param)
+
+    # run the split_recursively() function again with the updated curves list and the remaining parameters
+    return split_recursively(curves, dirs, params)
